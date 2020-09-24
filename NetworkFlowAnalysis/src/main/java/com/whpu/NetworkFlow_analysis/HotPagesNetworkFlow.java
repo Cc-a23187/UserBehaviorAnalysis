@@ -3,12 +3,15 @@ package com.whpu.NetworkFlow_analysis;
 import com.whpu.NetworkFlow_analysis.entry.ApacheLogEvent;
 import com.whpu.NetworkFlow_analysis.entry.PageViewCount;
 import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.RichFilterFunction;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple;
+import org.apache.flink.api.java.tuple.Tuple1;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -18,6 +21,7 @@ import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
 import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
+import org.apache.flink.streaming.api.scala.OutputTag;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.util.Collector;
@@ -27,10 +31,13 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * @author cc
  * @create 2020-09-10-15:59
+ *
  */
 public class HotPagesNetworkFlow {
     public static void main(String[] args) throws Exception {
@@ -51,8 +58,8 @@ public class HotPagesNetworkFlow {
                 //Long.valueOf(str[0].trim()),Long.valueOf(str[1].trim()),Integer.valueOf(str[2].trim()),str[3].trim(),Long.valueOf(str[4].trim())
                 return apacheLogEvent;
             }
-        }).assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor<ApacheLogEvent>(Time.seconds(60)) {
-            @Override //根据数据的情况设定一个60s的水位线
+        }).assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor<ApacheLogEvent>(Time.seconds(1)) {
+            @Override //根据数据的情况设定一个60s的水位线   后期优化水位线设置1s，allowedlateness设置为一分钟
             public long extractTimestamp(ApacheLogEvent apacheLogEvent) {
                 return apacheLogEvent.getTimestamp();
             }
@@ -60,6 +67,30 @@ public class HotPagesNetworkFlow {
         //开窗聚合 以及排序输出；
         SingleOutputStreamOperator<PageViewCount> aggStream = dataStream
                 .filter(apacheLogEvent -> apacheLogEvent.getMethod().equals("GET")).returns((Types.POJO(ApacheLogEvent.class)))
+                /*.map(apacheLogEvent -> {
+                    String pattern = "^((?!\\.(css|js)$).)*$";
+
+                        Pattern p = Pattern.compile(pattern);
+                        Matcher m = p.matcher(apacheLogEvent.getUrl());
+                        apacheLogEvent.setUrl(m.replaceAll(""));
+                        return apacheLogEvent;
+                })*/
+                /*.filter(new RichFilterFunction<ApacheLogEvent>() {
+                    @Override
+                    public boolean filter(ApacheLogEvent apacheLogEvent) throws Exception {
+                        String pattern = "^((?!\\.(css|js)$).)*$";
+                        boolean matcher = Pattern.matches(pattern,apacheLogEvent.getUrl());
+                        if (!matcher){
+
+                            return true;
+                        }else {
+                            Pattern p = Pattern.compile(pattern);
+                            Matcher m = p.matcher(apacheLogEvent.getUrl());
+                            apacheLogEvent.setUrl(m.replaceAll("/abc999"));
+                            return true;
+                        }
+                    }
+                })*/
                 .keyBy(new KeySelector<ApacheLogEvent, String>() {
                     @Override
                     public String getKey(ApacheLogEvent apacheLogEvent) throws Exception {
@@ -67,8 +98,12 @@ public class HotPagesNetworkFlow {
                     }
                 })
                 .timeWindow(Time.seconds(10),Time.seconds(5))
+                .allowedLateness(Time.seconds(60))
+                .sideOutputLateData(new OutputTag<ApacheLogEvent>("late",Types.POJO(ApacheLogEvent.class)))
                 .aggregate(new PageCountAgg(),new PageViewCountWindowResult());
 
+                aggStream.print("agg_main");
+                aggStream.getSideOutput(new OutputTag<ApacheLogEvent>("late",Types.POJO(ApacheLogEvent.class))).print("agg_late");
         SingleOutputStreamOperator<String> process = aggStream.keyBy(new KeySelector<PageViewCount, Long>() {
             @Override
             public Long getKey(PageViewCount pageViewCount) throws Exception {
